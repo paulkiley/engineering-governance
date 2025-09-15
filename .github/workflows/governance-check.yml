@@ -1,0 +1,53 @@
+name: Governance Check (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      require-templates:
+        type: boolean
+        default: true
+      markdownlint:
+        type: boolean
+        default: true
+      yamllint:
+        type: boolean
+        default: true
+
+jobs:
+  governance-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files
+        run: |
+          missing=0
+          check_file() { [[ -e "$1" ]] || { echo "MISSING: $1"; missing=$((missing+1)); }; }
+          check_dir()  { [[ -d "$1" ]] || { echo "MISSING DIR: $1"; missing=$((missing+1)); }; }
+          check_file CODEOWNERS || true
+          check_file .github/CODEOWNERS || true
+          check_file CONTRIBUTING.md
+          check_file SECURITY.md
+          check_file .github/PULL_REQUEST_TEMPLATE.md
+          check_dir  .github/ISSUE_TEMPLATE
+          if [[ $missing -gt 0 ]]; then echo "Governance check failed ($missing missing)"; exit 1; fi
+
+      - name: Markdownlint
+        if: inputs.markdownlint == true
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: |
+            **/*.md
+
+      - name: Yamllint
+        if: inputs.yamllint == true
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 120
+                level: warning
+              truthy:
+                level: warning
