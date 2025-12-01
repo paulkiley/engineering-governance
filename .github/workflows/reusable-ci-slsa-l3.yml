@@ -1,0 +1,176 @@
+# SLSA Build Level 3 Compliant Reusable CI Workflow
+# Based on: https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations
+#
+# This workflow generates signed provenance attestations that prove:
+# 1. WHERE the build ran (GitHub Actions)
+# 2. WHAT was built (artifact hashes)
+# 3. HOW it was built (this workflow, pinned)
+# 4. WHO triggered it (GitHub identity)
+#
+# SLSA L3 requires: reusable workflow + attestations + isolation
+# GitHub provides isolation; we provide the workflow + attestations.
+
+name: Reusable CI with SLSA L3 Provenance
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to use
+        type: string
+        default: '3.11'
+      artifact-name:
+        description: Name for the build artifact
+        type: string
+        default: 'build-artifacts'
+      attest:
+        description: Generate SLSA provenance attestation
+        type: boolean
+        default: true
+
+# REQUIRED for SLSA L3: These permissions enable attestation signing
+permissions:
+  id-token: write      # For OIDC token (provenance signing)
+  contents: read       # For checkout
+  attestations: write  # For uploading attestations
+
+jobs:
+  build-validate:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-path: ${{ steps.artifact.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq just zip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install nox jinja2 pyyaml
+
+      - name: Generate manifest (if available)
+        run: |
+          if [[ -f ./populate.sh ]]; then bash ./populate.sh; else echo "No populate.sh; skipping"; fi
+
+      - name: Validate manifest (if nox session present)
+        run: |
+          if [[ -f ./noxfile.py ]]; then nox -s validate_manifest --error-on-missing-interpreters; else echo "No noxfile.py; skipping"; fi
+
+      - name: Verify manifest matches sources (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if [[ -f ./verify.sh ]]; then bash ./verify.sh; else echo "No verify.sh; skipping"; fi
+
+      # Create a build artifact for attestation
+      - name: Create build artifact
+        id: artifact
+        run: |
+          mkdir -p dist
+          # Create a manifest of what was validated
+          echo "Build timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/BUILD_INFO.txt
+          echo "Python version: ${{ inputs.python-version }}" >> dist/BUILD_INFO.txt
+          echo "Git SHA: ${{ github.sha }}" >> dist/BUILD_INFO.txt
+          echo "Git ref: ${{ github.ref }}" >> dist/BUILD_INFO.txt
+          echo "Workflow: ${{ github.workflow }}" >> dist/BUILD_INFO.txt
+
+          # Include validation results if they exist
+          if [[ -d metrics ]]; then cp -r metrics dist/; fi
+          if [[ -d planning/validation ]]; then cp -r planning/validation dist/; fi
+
+          # Create tarball
+          tar -czvf dist/build-artifacts.tar.gz dist/BUILD_INFO.txt $(find dist -type f ! -name '*.tar.gz' 2>/dev/null || echo "")
+          echo "path=dist/build-artifacts.tar.gz" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/build-artifacts.tar.gz
+          if-no-files-found: error
+
+  lint-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff==0.6.9 black==24.8.0
+      - name: Ruff (lint)
+        run: |
+          if git ls-files '*.py' | grep -q .; then ruff check .; else echo "No Python files"; fi
+      - name: Black (format check)
+        run: |
+          if git ls-files '*.py' | grep -q .; then black --check .; else echo "No Python files"; fi
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install bandit
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit
+      - name: Bandit
+        run: |
+          if git ls-files '*.py' | grep -q .; then bandit -r -q -x .venv,venv,.git .; else echo "No Python files"; fi
+      - name: Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --no-git --redact --source .
+
+  lint-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: |
+            **/*.md
+      - name: Yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint.yml
+
+  # SLSA L3: Generate signed provenance attestation
+  attest:
+    needs: [build-validate, lint-python, security-scan, lint-docs]
+    if: ${{ inputs.attest }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/
+
+      - name: Generate SLSA provenance attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'dist/build-artifacts.tar.gz'
+
+      - name: Attestation summary
+        run: |
+          echo "## SLSA Build Level 3 Attestation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Provenance attestation generated and signed by GitHub" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Verify with:**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "gh attestation verify dist/build-artifacts.tar.gz --repo ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
