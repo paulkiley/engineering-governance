@@ -1,0 +1,25 @@
+# CI workflow using SLSA L3 reusable workflow
+name: CI (SLSA L3)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable-ci-slsa-l3.yml
+    with:
+      python-version: '3.11'
+      artifact-name: 'eng-gov-build'
+      attest: true
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
