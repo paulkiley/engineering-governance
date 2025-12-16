@@ -72,10 +72,10 @@ jobs:
           # Uses project's .bandit config if present for skip rules
           if git ls-files '*.py' | grep -q .; then
             if [[ -f .bandit ]]; then
-              # Use project config for skip rules, but scan only tracked files
-              git ls-files '*.py' | xargs bandit -q
+              # Use project YAML config for excludes and skip rules
+              git ls-files '*.py' | xargs bandit -c .bandit -q
             else
-              # Default: exclude common virtual env paths
+              # Default: scan all tracked Python files
               git ls-files '*.py' | xargs bandit -q
             fi
           else
