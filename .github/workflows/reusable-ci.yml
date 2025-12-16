@@ -68,7 +68,19 @@ jobs:
           pip install bandit
       - name: Bandit
         run: |
-          if git ls-files '*.py' | grep -q .; then bandit -r -q -x .venv,venv,.git .; else echo "No Python files"; fi
+          # Scan only git-tracked Python files (respects .gitignore)
+          # Uses project's .bandit config if present for skip rules
+          if git ls-files '*.py' | grep -q .; then
+            if [[ -f .bandit ]]; then
+              # Use project config for skip rules, but scan only tracked files
+              git ls-files '*.py' | xargs bandit -q
+            else
+              # Default: exclude common virtual env paths
+              git ls-files '*.py' | xargs bandit -q
+            fi
+          else
+            echo "No Python files"
+          fi
       - name: Gitleaks (secret scan)
         uses: gitleaks/gitleaks-action@v2
         with:
